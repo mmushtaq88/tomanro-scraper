@@ -417,7 +417,7 @@ def get_product_variants(page_link):
 import csv
 from concurrent.futures import ThreadPoolExecutor
 
-def scrape_all_products_to_csv(output_file='products.csv', max_workers=5):
+def scrape_all_products_to_csv(output_file='output.csv', max_workers=5):
     """
     Fetch all product variants from tomanro.de and save to a CSV file.
 
@@ -466,4 +466,5 @@ def scrape_all_products_to_csv(output_file='products.csv', max_workers=5):
     else:
         print("No product data found.")
 
-scrape_all_products_to_csv()
+if __name__ == "__main__":
+    scrape_all_products_to_csv()
