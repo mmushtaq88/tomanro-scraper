@@ -420,7 +420,7 @@ from concurrent.futures import ThreadPoolExecutor
 def scrape_all_products_to_csv(output_file='output.csv', max_workers=5):
     """
     Fetch all product variants from tomanro.de and save to a CSV file.
-
+//
     Steps:
     1. Fetch all sub-sub-category links.
     2. For each category, fetch all product links.
