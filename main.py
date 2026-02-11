@@ -490,7 +490,7 @@ def scrape_all_products_to_csv(output_file='output', max_workers=5):
     Args:
         output_file (str): Base name for output files (without extension).
                           Will create output_file.xlsx and output_file.json
-        max_workers (int): Number of threads for parallel product scraping.
+        max_workers (int): Number of threads for parallel product scraping..
     """
 
     print("Fetching all category links...")
