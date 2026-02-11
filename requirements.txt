@@ -1,8 +1,12 @@
-# Uncomment to enable Azure Monitor OpenTelemetry
-# Ref: aka.ms/functions-azure-monitor-python
-# azure-monitor-opentelemetry
-
-azure-functions
+# Web scraping dependencies
 requests
 beautifulsoup4
 selenium
+playwright
+
+# Data processing and export
+pandas
+openpyxl
+
+# Azure Functions (if needed)
+azure-functions

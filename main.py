@@ -13,9 +13,9 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor
 
-
 BASE_URL = "https://www.tomanro.de/"
 MENU_ENDPOINT = "https://www.tomanro.de/MenuDeskNeu.php?Menubut={}"
+
 
 def get_sub_sub_category_links():
     """
@@ -47,40 +47,99 @@ def get_sub_sub_category_links():
 
     return sorted(links)
 
+
 ##################################################################################################################
 ## PRODUCTS LINKS EXTRACTOR
 ##################################################################################################################
 
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+
+
+def _scroll_to_bottom(page, max_iterations: int = 40, wait_ms: int = 600) -> None:
+    """
+    Scrolls the page to the bottom, repeatedly, to trigger lazy loading.
+    Stops when further scrolling no longer increases the document height
+    or when max_iterations is reached.
+    """
+    last_height = 0
+
+    for _ in range(max_iterations):
+        # Scroll to the bottom
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+        page.wait_for_timeout(wait_ms)
+
+        # Check if more content was loaded
+        new_height = page.evaluate("document.body.scrollHeight")
+        if new_height == last_height:
+            break
+        last_height = new_height
+
+
 def fetch_page_links(url, headers):
-    """Fetch product links from a single page HTML"""
-    r = requests.get(url, headers=headers, timeout=50)
-    if r.status_code != 200:
-        print(f"Failed to fetch {url}")
-        return set()
+    """
+    Fetch product links from a single sub-sub-category page HTML.
 
-    soup = BeautifulSoup(r.text, "html.parser")
+    This implementation uses Playwright to fully render the page and
+    scroll to the bottom so that lazily loaded products appear before
+    parsing. The function signature and return type remain unchanged.
+    """
     product_links = set()
-
-    # 🔹 Extract only real product links from product grid
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.endswith("-Typen"):
-            full_url = urljoin(url, href)
-            product_links.add(full_url)
-
-    # 🔹 Extract pagination URLs
-    pagination = soup.select_one(".floatright")
     page_urls = []
-    if pagination:
-        for a in pagination.find_all("a", href=True):
-            page_urls.append(urljoin(url, a["href"]))
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+
+        context_kwargs = {}
+        if isinstance(headers, dict) and "User-Agent" in headers:
+            context_kwargs["user_agent"] = headers["User-Agent"]
+
+        context = browser.new_context(**context_kwargs)
+        page = context.new_page()
+
+        try:
+            page.goto(url, wait_until="load", timeout=60000)
+
+            # Try to accept cookies if the banner appears
+            try:
+                page.locator("button.button_einverstanden").first.click(timeout=3000)
+                page.wait_for_timeout(500)
+            except PlaywrightTimeoutError:
+                # Cookie banner not visible; continue normally
+                pass
+
+            # Scroll to the bottom to ensure all products are loaded
+            _scroll_to_bottom(page)
+
+            # Get the fully rendered HTML and parse with the existing logic
+            html = page.content()
+            soup = BeautifulSoup(html, "html.parser")
+
+            # 🔹 Extract only real product links from product grid
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if href.endswith("-Typen"):
+                    full_url = urljoin(url, href)
+                    product_links.add(full_url)
+
+            # 🔹 Extract pagination URLs
+            pagination = soup.select_one(".floatright")
+            if pagination:
+                for a in pagination.find_all("a", href=True):
+                    page_urls.append(urljoin(url, a["href"]))
+
+        finally:
+            browser.close()
 
     return product_links, page_urls
 
 
 def get_all_product_links(start_url):
-    # headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-
+    """
+    Given a sub-sub-category URL, return all product links for that
+    category across all pagination pages.
+    """
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -93,21 +152,21 @@ def get_all_product_links(start_url):
     to_visit_pages = [start_url]
     all_product_links = set()
 
+    # Sequentially visit each pagination page to avoid missing links
     while to_visit_pages:
-        # Fetch pages in parallel for speed
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            results = list(executor.map(lambda u: fetch_page_links(u, headers), to_visit_pages))
+        current_url = to_visit_pages.pop(0)
+        if current_url in visited_pages:
+            continue
 
-        next_pages = []
-        for i, (products, pages) in enumerate(results):
-            all_product_links.update(products)
-            visited_pages.add(to_visit_pages[i])
-            # Only add unvisited pages
-            for p in pages:
-                if p not in visited_pages and p not in to_visit_pages and p not in next_pages:
-                    next_pages.append(p)
+        visited_pages.add(current_url)
 
-        to_visit_pages = next_pages
+        products, pages = fetch_page_links(current_url, headers)
+        all_product_links.update(products)
+
+        # Add new pagination pages to the queue
+        for p_url in pages:
+            if p_url not in visited_pages and p_url not in to_visit_pages:
+                to_visit_pages.append(p_url)
 
     return list(all_product_links)
 
@@ -410,25 +469,27 @@ def get_product_variants(page_link):
     return scrape_product_variants(page_link)
 
 
-
 #####################################################################################################
 ## MAIN SCRAPER
 #####################################################################################################
-import csv
+import json
+import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
-def scrape_all_products_to_csv(output_file='output.csv', max_workers=5):
+
+def scrape_all_products_to_csv(output_file='output', max_workers=5):
     """
-    Fetch all product variants from tomanro.de and save to a CSV file.
-//
+    Fetch all product variants from tomanro.de and save to Excel and JSON files.
+
     Steps:
     1. Fetch all sub-sub-category links.
     2. For each category, fetch all product links.
     3. For each product, fetch all variants.
-    4. Save all variants to a CSV file.
+    4. Save all variants to Excel (.xlsx) and JSON (.json) files.
 
     Args:
-        output_file (str): Path to save the CSV file.
+        output_file (str): Base name for output files (without extension).
+                          Will create output_file.xlsx and output_file.json
         max_workers (int): Number of threads for parallel product scraping.
     """
 
@@ -454,17 +515,24 @@ def scrape_all_products_to_csv(output_file='output.csv', max_workers=5):
         print(f"  Total variants collected so far: {len(all_products)}")
 
     if all_products:
-        # Write to CSV
-        keys = all_products[0].keys()
-        with open(output_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=keys)
-            writer.writeheader()
-            writer.writerows(all_products)
+        # Determine output file names
+        excel_file = f"{output_file}.xlsx"
+        json_file = f"{output_file}.json"
+
+        # Save to Excel
+        df = pd.DataFrame(all_products)
+        df.to_excel(excel_file, index=False, engine='openpyxl')
+        print(f"\nData saved to Excel: {excel_file}")
+
+        # Save to JSON
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(all_products, f, ensure_ascii=False, indent=2)
+        print(f"Data saved to JSON: {json_file}")
 
         print(f"\nScraping completed. Total variants: {len(all_products)}")
-        print(f"Data saved to {output_file}")
     else:
         print("No product data found.")
+
 
 if __name__ == "__main__":
     scrape_all_products_to_csv()
